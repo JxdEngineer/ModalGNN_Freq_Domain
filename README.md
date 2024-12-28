@@ -1,4 +1,7 @@
 # ModalGNN_Freq_Domain
+
+28/12/2024: Please note that this repository is currently under development and will undergo significant updates following the publication of our paper.
+
 This repository presents codes of our paper below:
 
 Jian, X., Xia, Y., Duthé, G., Bacsa, K., Liu, W., & Chatzi, E. (2024). Using Graph Neural Networks and Frequency Domain Data for Automated Operational Modal Analysis of Populations of Structures. arXiv preprint arXiv:2407.06492.
