@@ -2,7 +2,7 @@
 
 28/12/2024: Please note that this repository is currently under development and will undergo significant updates following the publication of our paper.
 
-18/08/2025: Our paper is accepted by "Data-Centric Engineering". Therefore, the latest version of code and data are pushed to this repository.
+18/08/2025: Our paper is accepted by "Data-Centric Engineering". Therefore, the latest version of code and data is pushed to this repository.
 
 This repository presents codes of our paper below:
 
