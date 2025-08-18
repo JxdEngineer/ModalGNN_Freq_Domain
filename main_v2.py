@@ -265,7 +265,7 @@ def MAC(x, y):
     return mac
 
 # Load data from the current folder
-mat_contents = sio.loadmat("./trapezoid_pwelch_bottom_input.mat") # pupolation 1
+mat_contents = sio.loadmat("./dataset1_train_valid_PSD.mat") # pupolation 1
 
 acc_input = mat_contents['acceleration_pwelch'][:, 0]
 for i in range(len(acc_input)):  # downsample the PSD ########################
@@ -298,6 +298,24 @@ class Dataset(DGLDataset):
             graph_sub = dgl.graph((src, dst))  #       
             graph_sub.ndata['acc_Y'] = torch.tensor(acc_input[graph_id], dtype = torch.float)
             graph_sub.ndata['phi_Y'] = torch.tensor(phi[graph_id][:, 0:modeN], dtype = torch.float)  
+            
+            # uncomment this section to train the model with incomplete measurements #################
+            # node_sub = node[graph_id]
+            # node_mask = torch.ones(len(node_sub), dtype=torch.bool)
+            # acc_sub = graph_sub.ndata['acc_Y']
+            # # 82% unknown node features
+            # missing_indices = np.array(range(1, len(node_sub), 2))
+            # node_mask[missing_indices] = False
+            # missing_indices = np.array(range(1, len(node_sub), 3))
+            # node_mask[missing_indices] = False
+            # missing_indices = np.array(range(2, len(node_sub), 3))
+            # node_mask[missing_indices] = False
+            # edge_index =  torch.LongTensor([list(row) for row in list(zip(src, dst))]).T
+            # acc_sub_FP = Feature_Propagation(acc_sub, node_mask, edge_index, len(node_sub))
+            # acc_sub_FP[acc_sub[:,1]==0, :] = 0 # applying boundary condition
+            # graph_sub.ndata['acc_Y'] = acc_sub_FP
+            # uncomment this section to train the model with incomplete measurements #################
+            
             g = graph_sub.to(device)
             graph_freq = freq[graph_id][:modeN].squeeze()
             graph_zeta = zeta[graph_id][:modeN].squeeze()
@@ -313,8 +331,7 @@ class Dataset(DGLDataset):
     def __len__(self):
         return len(self.graphs)
 
-size_factor = 1
-N_all = int(2500)
+size_factor = 0.25
 N_train = int(2000*size_factor)
 N_valid = int(400*size_factor)
 bs = int(400*size_factor)
@@ -359,13 +376,12 @@ loss_meter_valid_phi = []
 loss_meter_valid_zeta = []
 loss_meter_valid_freq = []
 
-model.train()
 
 lambda1 = 2
 lambda2 = 1
 lambda3 = 1
 
-use_wandb = 1 # choose to whether use weights&biases to record the results， 1： use, 2: not use
+use_wandb = 1 # choose to whether use weights&biases to record the results， 1： use, 0: not use
 
 # start a new wandb run to track the training process #####################
 if use_wandb == 1:
@@ -393,20 +409,22 @@ for epoch in range(n_epoch):
     epoch_loss_valid_zeta = 0
     epoch_loss_valid_freq = 0
     epoch_loss_valid = 0
-    for graph_valid, freq_valid, zeta_valid in dataloader_valid:
-        freq_pred_valid, zeta_pred_valid, phi_pred_valid = model(graph_valid)  # valid with complete observations 
-        # loss about phi
-        loss_valid_phi = loss_mse(phi_pred_valid.squeeze(), graph_valid.ndata['phi_Y'])
-        # loss about zeta
-        loss_valid_zeta = loss_mse(zeta_pred_valid/zeta_valid, torch.ones(zeta_valid.shape).to(device))
-        # loss about freq
-        loss_valid_freq = loss_mse(freq_pred_valid/freq_valid, torch.ones(freq_valid.shape).to(device))
-        # total loss
-        loss_valid =  loss_valid_phi * lambda1 + loss_valid_zeta * lambda2 + loss_valid_freq * lambda3
-        epoch_loss_valid_phi += loss_valid_phi.item()
-        epoch_loss_valid_zeta += loss_valid_zeta.item()
-        epoch_loss_valid_freq += loss_valid_freq.item()
-        epoch_loss_valid += loss_valid.item()
+    model.eval()
+    with torch.no_grad():
+        for graph_valid, freq_valid, zeta_valid in dataloader_valid:            
+            freq_pred_valid, zeta_pred_valid, phi_pred_valid = model(graph_valid)  # valid with complete observations 
+            # loss about phi
+            loss_valid_phi = loss_mse(phi_pred_valid.squeeze(), graph_valid.ndata['phi_Y'])
+            # loss about zeta
+            loss_valid_zeta = loss_mse(zeta_pred_valid/zeta_valid, torch.ones(zeta_valid.shape).to(device))
+            # loss about freq
+            loss_valid_freq = loss_mse(freq_pred_valid/freq_valid, torch.ones(freq_valid.shape).to(device))
+            # total loss
+            loss_valid =  loss_valid_phi * lambda1 + loss_valid_zeta * lambda2 + loss_valid_freq * lambda3
+            epoch_loss_valid_phi += loss_valid_phi.item()
+            epoch_loss_valid_zeta += loss_valid_zeta.item()
+            epoch_loss_valid_freq += loss_valid_freq.item()
+            epoch_loss_valid += loss_valid.item()
     epoch_loss_valid_phi /= len(dataloader_valid)
     epoch_loss_valid_zeta /= len(dataloader_valid)
     epoch_loss_valid_freq /= len(dataloader_valid)
@@ -420,6 +438,7 @@ for epoch in range(n_epoch):
     epoch_loss_train_zeta = 0
     epoch_loss_train_freq = 0
     epoch_loss_train = 0
+    model.train()
     for graph_train, freq_train, zeta_train in dataloader_train:
         freq_pred_train, zeta_pred_train, phi_pred_train = model(graph_train)  # train with complete observations
         # loss about phi
@@ -430,13 +449,16 @@ for epoch in range(n_epoch):
         loss_train_freq = loss_mse(freq_pred_train/freq_train, torch.ones(freq_train.shape).to(device))
         # total loss
         loss_train = loss_train_phi * lambda1 + loss_train_zeta * lambda2 + loss_train_freq * lambda3
+        
+        opt.zero_grad()
+        loss_train.backward()
+        opt.step()
+        
         epoch_loss_train_phi += loss_train_phi.item()
         epoch_loss_train_zeta += loss_train_zeta.item()
         epoch_loss_train_freq += loss_train_freq.item()
         epoch_loss_train += loss_train.item()
-        opt.zero_grad()
-        loss_train.backward()
-        opt.step()
+        
     epoch_loss_train_phi /= len(dataloader_train)
     epoch_loss_train_zeta /= len(dataloader_train)
     epoch_loss_train_freq /= len(dataloader_train)
@@ -456,7 +478,7 @@ for epoch in range(n_epoch):
                     "loss_valid_phi": loss_valid_phi,
                     "loss_valid_zeta": loss_valid_zeta,
                     "loss_valid_freq": loss_valid_freq})    
-
+wandb.finish()
 time_train = time.time() - start_time
 print("--- %s seconds ---" % time_train)
 
@@ -468,8 +490,8 @@ plt.semilogy(loss_meter_train, label='training', color='#FF1F5B')
 plt.semilogy(loss_meter_valid, label='validation', color='#00CD6C')
 title_text = "Final train loss={:.6f}, Final valid loss={:.6f}, Time={:.3f}".format(loss_meter_train[-1], loss_meter_valid[-1], time_train)
 plt.title(title_text)
-plt.xlabel('Epoch', fontsize=18, fontname='Times New Roman')
-plt.ylabel('log10(Loss)', fontsize=18, fontname='Times New Roman')
+plt.xlabel('Epoch', fontsize=16, fontname='Times New Roman')
+plt.ylabel('log10(Loss)', fontsize=16, fontname='Times New Roman')
 plt.legend()
 plt.grid()
 plt.show()
@@ -479,9 +501,9 @@ plt.plot(np.log10(loss_meter_train), label='training', color='#FF1F5B')
 plt.plot(np.log10(loss_meter_valid), label='validation', color='#00CD6C')
 # plt.semilogy(loss_meter_train, label='training', color='#FF1F5B')
 # plt.semilogy(loss_meter_valid, label='validation', color='#00CD6C')
-plt.ylim([-4, 4])
-plt.xlabel('Epoch', fontsize=18, fontname='Times New Roman')
-plt.ylabel('log10(Loss)', fontsize=18, fontname='Times New Roman')
+plt.ylim([-4, 2])
+plt.xlabel('Epoch', fontsize=16, fontname='Times New Roman')
+plt.ylabel('log10(Loss)', fontsize=16, fontname='Times New Roman')
 plt.xticks(np.arange(0, n_epoch+1, 2500))
 plt.xticks(fontsize=18, fontname='Times New Roman')
 plt.yticks(fontsize=18, fontname='Times New Roman')
@@ -491,14 +513,14 @@ plt.grid()
 plt.show()
 
 plt.figure(figsize=(4*2.54/2.54, 3*2.54/2.54))
-plt.plot(np.log10(loss_meter_train_phi), label='$\hat{\u03A6}$', color='#FF1F5B')
+plt.plot(np.log10(loss_meter_train_phi), label='$|\hat{\u03A6}|$', color='#FF1F5B')
 plt.plot(np.log10(loss_meter_train_zeta), label='$\hat{Z}$', color='#00CD6C')
 plt.plot(np.log10(loss_meter_train_freq), label='$\hat{F}$', color='#AF58BA')
 # title_text = "Final phi loss={:.6f}, zeta loss={:.6f}, freq loss={:.6f}".format(loss_meter_valid_phi[-1], loss_meter_valid_zeta[-1], loss_meter_valid_freq[-1])
 # plt.title(title_text)
-plt.ylim([-4, 4])
-plt.xlabel('Epoch', fontsize=18, fontname='Times New Roman')
-plt.ylabel('log10(Loss)', fontsize=18, fontname='Times New Roman')
+plt.ylim([-4, 2])
+plt.xlabel('Epoch', fontsize=16, fontname='Times New Roman')
+plt.ylabel('log10(Loss)', fontsize=16, fontname='Times New Roman')
 plt.xticks(np.arange(0, n_epoch+1, 2500))
 plt.xticks(fontsize=18, fontname='Times New Roman')
 plt.yticks(fontsize=18, fontname='Times New Roman')
@@ -508,14 +530,14 @@ plt.grid()
 plt.show()
 
 plt.figure(figsize=(4*2.54/2.54, 3*2.54/2.54))
-plt.plot(np.log10(loss_meter_valid_phi), label='$\hat{\u03A6}$', color='#FF1F5B')
+plt.plot(np.log10(loss_meter_valid_phi), label='$|\hat{\u03A6}|$', color='#FF1F5B')
 plt.plot(np.log10(loss_meter_valid_zeta), label='$\hat{Z}$', color='#00CD6C')
 plt.plot(np.log10(loss_meter_valid_freq), label='$\hat{F}$', color='#AF58BA')
 # title_text = "Final phi loss={:.6f}, zeta loss={:.6f}, freq loss={:.6f}".format(loss_meter_valid_phi[-1], loss_meter_valid_zeta[-1], loss_meter_valid_freq[-1])
 # plt.title(title_text)
-plt.ylim([-4, 4])
-plt.xlabel('Epoch', fontsize=18, fontname='Times New Roman')
-plt.ylabel('log10(Loss)', fontsize=18, fontname='Times New Roman')
+plt.ylim([-4, 2])
+plt.xlabel('Epoch', fontsize=16, fontname='Times New Roman')
+plt.ylabel('log10(Loss)', fontsize=16, fontname='Times New Roman')
 plt.xticks(np.arange(0, n_epoch+1, 2500))
 plt.xticks(fontsize=18, fontname='Times New Roman')
 plt.yticks(fontsize=18, fontname='Times New Roman')
@@ -528,70 +550,48 @@ print(kk)
 # save model if needed
 PATH = "model_SAGE.pt"
 torch.save(model.state_dict(), PATH)
-
-# calculate the loss on the test set for recording purposes
-test_no = np.array(range(N_train + N_valid, N_all))
-test_set = Dataset(graph_ids=test_no)
-dataloader_test = dgl.dataloading.GraphDataLoader(test_set, batch_size=100,
-                              drop_last=False, shuffle=False)
-model.eval()
-for graph_test, freq_test, zeta_test in dataloader_test:
-    freq_pred_test, zeta_pred_test, phi_pred_test = model(graph_test)  # train with complete observations
-    # loss about phi
-    loss_test_phi = loss_mse(phi_pred_test.squeeze(), graph_test.ndata['phi_Y'])
-    # loss about zeta
-    loss_test_zeta = loss_mse(zeta_pred_test/zeta_test, torch.ones(zeta_test.shape).to(device))
-    # loss about freq
-    loss_test_freq = loss_mse(freq_pred_test/freq_test, torch.ones(freq_test.shape).to(device))
-
-# log test loss
-if use_wandb == 1:
-    wandb.log({"loss_test": loss_test_phi + loss_test_zeta + loss_test_freq,
-                "loss_test_phi": loss_test_phi,
-                "loss_test_zeta": loss_test_zeta,
-                "loss_test_freq": loss_test_freq}) 
-    wandb.finish()
-# %% test trained model with population 1
+# %% test trained models (before running the test, run the first cell of this script)
 N_test = 100 # use the last 100 trusses for testing
 
-# load test data - to load data, first run the first cell of this script
-# because test data is the last 100 trusses in the entire dataset
-
-# test the model 
+complete_test = 1 # 1: test with complete measurements, 0: test with incomplete measurements, where 82% node features are unknown
 
 # load trained model
-PATH = "model_SAGE_train2000.pt"
-size_factor = 1
+PATH = "model_SAGE_truss2000.pt"
+# PATH = "model_SAGE_truss500.pt"
+# PATH = "model_SAGE_truss200.pt"
+# PATH = "model_SAGE_truss20.pt"
+# PATH = "model_SAGE_incomplete.pt"
+# PATH = "model_SAGE_PSD512.pt"  # need to downsample the PSD below!
+# PATH = "model_SAGE_PSD256.pt"  # need to downsample the PSD below!
 
-# PATH = "model_SAGE_PSD512.pt"
-# size_factor = 1
+# load test data
+# mat_contents = sio.loadmat("./dataset1_test_PSD.mat") # pupolation 1, without noise
+mat_contents = sio.loadmat("./dataset1_test_PSD_noise.mat") # pupolation 1, with noise
+# mat_contents = sio.loadmat("./dataset2_test_PSD.mat") # pupolation 2
 
-# PATH = "model_SAGE_PSD256.pt"
-# size_factor = 1
+acc_input = mat_contents['acceleration_pwelch'][:, 0]
+for i in range(len(acc_input)):  # downsample the PSD ########################
+    acc_input[i] = acc_input[i][:, ::1] # 1:PSD1024, 2:PSD512, 4:PSD256
+input_dim = np.shape(acc_input[0])[1]
+freq = mat_contents['frequency_out'][:, 0]
+zeta = mat_contents['damping_out'][:, 0]
+phi = abs(mat_contents['modeshape_out'][:, 0])*1  # absolute mode shape
+node = mat_contents['node_out'][:, 0]
+element = mat_contents['element_out'][:, 0]
 
-# PATH = "model_SAGE_train500.pt"
-# size_factor = 0.25
 
-# PATH = "model_SAGE_train200.pt"
-# size_factor = 0.1
-
-# PATH = "model_SAGE_train20.pt"
-# size_factor = 0.01
-
+model = Model(encoder_hid_dim = model_dim,
+              encoder_out_dim = model_dim,
+              GNN_hid_dim = model_dim,
+              GNN_out_dim = model_dim,
+              decoder_hid_dim = model_dim)  # each node has 1 output features corresponding to the first order of modeshapes
 model.load_state_dict(torch.load(PATH))
-
-N_train = int(2000*size_factor) # definition of size_factor is in the training cell above
-N_valid = int(400*size_factor)
-kk = 6  # cross validation, from 1 to 6, here using 6 because the model is trained with the 6th fold
-valid_no = np.array(range(0, N_valid)) + (kk-1)*N_valid
-train_no = np.setdiff1d(np.array(range(0,N_train+N_valid)), valid_no)
-
 
 model.eval()
 model = model.cpu()
 
 # test with a single sample #################################################
-caseN = 20 - 1 + 2400
+caseN = 20 - 1
 test_data = Dataset(graph_ids = [caseN])[0]
 graph_test = test_data[0].cpu()
 freq_test_true = test_data[1].cpu()
@@ -602,27 +602,25 @@ element_test = element[caseN] - 1
 
 node_mask = torch.ones(len(node_test), dtype=torch.bool)
 
-# uncomment the first two missing indices: 66% unknown node features
-# uncomment three missing indices: 82% unknown node features
-# missing_indices = np.array(range(1, len(node_test), 2))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(1, len(node_test), 3))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(2, len(node_test), 3))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(3, len(node_test), 3))
-# node_mask[missing_indices] = False
+if complete_test == 0:
+    # 82% unknown node features
+    missing_indices = np.array(range(1, len(node_test), 2))
+    node_mask[missing_indices] = False
+    missing_indices = np.array(range(1, len(node_test), 3))
+    node_mask[missing_indices] = False
+    missing_indices = np.array(range(2, len(node_test), 3))
+    node_mask[missing_indices] = False
 
-missing_ratio = np.count_nonzero(node_mask == False)/len(node_mask)
-print('missing_ratio =', missing_ratio)
-src = np.concatenate((element_test[:,0], element_test[:,1]), axis=0) # bi-directional edge, left-end node no. 
-dst = np.concatenate((element_test[:,1], element_test[:,0]), axis=0) # bi-directional edge, right-end node no.
-edge_index =  torch.LongTensor([list(row) for row in list(zip(src, dst))]).T
-
-acc_test = graph_test.ndata['acc_Y']
-acc_test_FP = Feature_Propagation(acc_test, node_mask, edge_index, len(node_test))
-acc_test_FP[acc_test[:,1]==0, :] = 0
-graph_test.ndata['acc_Y'] = acc_test_FP
+    missing_ratio = np.count_nonzero(node_mask == False)/len(node_mask)
+    print('missing_ratio =', missing_ratio)
+    src = np.concatenate((element_test[:,0], element_test[:,1]), axis=0) # bi-directional edge, left-end node no. 
+    dst = np.concatenate((element_test[:,1], element_test[:,0]), axis=0) # bi-directional edge, right-end node no.
+    edge_index =  torch.LongTensor([list(row) for row in list(zip(src, dst))]).T
+    
+    acc_test = graph_test.ndata['acc_Y']
+    acc_test_FP = Feature_Propagation(acc_test, node_mask, edge_index, len(node_test))
+    acc_test_FP[acc_test[:,1]==0, :] = 0
+    graph_test.ndata['acc_Y'] = acc_test_FP
 
 magnify = 3 # magnify the mode shapes for better visualization
 marker_size = 5
@@ -632,7 +630,6 @@ for mode_order, ax in enumerate(axs.flat):
     phi_test_true = graph_test.ndata['phi_Y'][:, mode_order]
     freq_test_pred, zeta_test_pred, phi_test_pred = model(graph_test)
     phi_test_pred = phi_test_pred[:, mode_order] / phi_test_pred[:, mode_order].max()
-    MSE_ms_model = loss_mse(phi_test_pred, phi_test_true)
 
     # plot the truss
     node_pred = np.zeros([len(node_test), 2])
@@ -659,11 +656,13 @@ for mode_order, ax in enumerate(axs.flat):
         node1 = node_pred[ele[0]]
         node2 = node_pred[ele[1]]
         ax.plot([node1[0], node2[0]], [node1[1], node2[1]], color='#AF58BA')
-    # complete measurements    
-    ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified', color='#AF58BA')
-    # incomplete measurements  
-    # ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified_known', color='#AF58BA')
-    # ax.plot(node_pred[~node_mask, 0], node_pred[~node_mask, 1], 's', markersize=3, label='identified_unknown', color='#00CD6C')
+    if complete_test == 1:    
+        # complete measurements    
+        ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified', color='#AF58BA')
+    elif complete_test == 0:
+        # incomplete measurements  
+        ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified_known', color='#AF58BA')
+        ax.plot(node_pred[~node_mask, 0], node_pred[~node_mask, 1], 's', markersize=3, label='identified_unknown', color='#00CD6C')
     
     plt.setp(ax.get_xticklabels(), fontsize=10, fontname='Times New Roman')
     plt.setp(ax.get_yticklabels(), fontsize=10, fontname='Times New Roman')
@@ -704,14 +703,13 @@ for caseN in range(len(zeta)):
     element_test = element[caseN] - 1   
     node_mask = torch.ones(len(node_test), dtype=torch.bool)
     
-    # uncomment the first two missing indices: 66% unknown node features
-    # uncomment three missing indices: 82% unknown node features
-    # missing_indices = np.array(range(1, len(node_test), 2))
-    # node_mask[missing_indices] = False
-    # missing_indices = np.array(range(1, len(node_test), 3))
-    # node_mask[missing_indices] = False
-    # missing_indices = np.array(range(2, len(node_test), 3))
-    # node_mask[missing_indices] = False
+    if complete_test == 0:
+        missing_indices = np.array(range(1, len(node_test), 2))
+        node_mask[missing_indices] = False
+        missing_indices = np.array(range(1, len(node_test), 3))
+        node_mask[missing_indices] = False
+        missing_indices = np.array(range(2, len(node_test), 3))
+        node_mask[missing_indices] = False
     
     missing_ratio = np.count_nonzero(node_mask == False)/len(node_mask)
     
@@ -736,6 +734,7 @@ print('missing_ratio =', missing_ratio)
 freq_true = np.zeros([len(zeta), modeN])
 zeta_true = np.zeros([len(zeta), modeN])
 MAC_phi = np.zeros([len(zeta), modeN])
+MAE_phi = np.zeros([len(zeta), modeN])
 RE_freq = np.zeros([len(zeta), modeN])
 RE_zeta = np.zeros([len(zeta), modeN])
 for mode_order in range(modeN):
@@ -752,6 +751,7 @@ for mode_order in range(modeN):
         RE_freq[caseN, mode_order] = (freq_pred[caseN, mode_order] - freq_test_true) / freq_test_true  # relative error in percentage
         RE_zeta[caseN, mode_order] = (zeta_pred[caseN, mode_order] - zeta_test_true) / zeta_test_true
         MAC_phi[caseN, mode_order] = MAC(phi_pred[caseN][:, mode_order], phi_test_true)
+        MAE_phi[caseN, mode_order] = abs(phi_pred[caseN][:, mode_order] - phi_test_true).mean()
 
 # plt.close('all')
 fig, ax = plt.subplots(3, 1, layout="constrained")
@@ -774,15 +774,20 @@ for k in range(3):
         ax[k].set_xlabel('Sample No.', fontsize=14)
     ax[k].grid()
 
-statistics_phi = np.zeros([3, modeN])
+statistics_phi_MAC = np.zeros([3, modeN])
+statistics_phi_MAE = np.zeros([3, modeN])
 statistics_freq = np.zeros([3, modeN])
 statistics_zeta = np.zeros([3, modeN])
 
 for j in range(modeN):
-    # mode shape
-    statistics_phi[0, j] = np.mean(MAC_phi[-N_test:, j])
-    statistics_phi[1, j] = np.std(MAC_phi[-N_test:, j])
-    statistics_phi[2, j] = np.min(MAC_phi[-N_test:, j])
+    # mode shape MAC
+    statistics_phi_MAC[0, j] = np.mean(MAC_phi[-N_test:, j])
+    statistics_phi_MAC[1, j] = np.std(MAC_phi[-N_test:, j])
+    statistics_phi_MAC[2, j] = np.min(MAC_phi[-N_test:, j])
+    # mode shape MAE
+    statistics_phi_MAE[0, j] = np.mean(MAE_phi[-N_test:, j])
+    statistics_phi_MAE[1, j] = np.std(MAE_phi[-N_test:, j])
+    statistics_phi_MAE[2, j] = np.max(MAE_phi[-N_test:, j])
     # frequency
     statistics_freq[0, j] = np.mean(RE_freq[-N_test:, j])
     statistics_freq[1, j] = np.std(RE_freq[-N_test:, j])
@@ -792,33 +797,19 @@ for j in range(modeN):
     statistics_zeta[1, j] = np.std(RE_zeta[-N_test:, j])
     statistics_zeta[2, j] = np.max(abs(RE_zeta[-N_test:, j]))
 
-statistics_phi = np.transpose(statistics_phi)
+statistics_phi_MAC = np.transpose(statistics_phi_MAC)
+statistics_phi_MAE = np.transpose(statistics_phi_MAE)
 statistics_zeta = np.transpose(statistics_zeta) * 100
 statistics_freq = np.transpose(statistics_freq) * 100
     
-print("Mode shape")
-print(statistics_phi)
+print("Mode shape MAC")
+print(statistics_phi_MAC)
+print("Mode shape MAE")
+print(statistics_phi_MAE)
 print("Damping")
 print(statistics_zeta)
 print("Freq")
 print(statistics_freq)
-
-# mode shape MAC results of training set
-marker_size = 10
-plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(np.zeros([N_train, 1])+1, MAC_phi[train_no, 0], color='#FF1F5B', label='mode 1', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_train, 1])+2, MAC_phi[train_no, 1], color='#00CD6C', label='mode 2', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_train, 1])+3, MAC_phi[train_no, 2], color='#FFC61E', label='mode 3', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_train, 1])+4, MAC_phi[train_no, 3], color='#AF58BA', label='mode 4', s=marker_size, alpha=1)
-plt.boxplot(MAC_phi[train_no, :], 0, '')
-plt.xticks([1, 2, 3, 4], ['Mode1', 'Mode2', 'Mode3', 'Mode4'])
-plt.ylim([0, 1.05])
-plt.xticks(fontsize=17, fontname='Times New Roman')
-plt.yticks(fontsize=17, fontname='Times New Roman')
-plt.ylabel('MAC', fontname='Times New Roman', fontsize=17)
-plt.grid()
-plt.tight_layout()
-plt.show()
 
 # mode shape MAC results of testing set
 plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
@@ -832,26 +823,6 @@ plt.ylim([0, 1.05])
 plt.xticks(fontsize=17, fontname='Times New Roman')
 plt.yticks(fontsize=17, fontname='Times New Roman')
 plt.ylabel('MAC', fontname='Times New Roman', fontsize=17)
-plt.grid()
-plt.tight_layout()
-plt.show()
-
-# frequency results of training set
-plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(freq_true[train_no, 0], freq_pred[train_no, 0], color='#FF1F5B', label='mode 1', s=marker_size, alpha=1)
-plt.scatter(freq_true[train_no, 1], freq_pred[train_no, 1], color='#00CD6C', label='mode 2', s=marker_size, alpha=1)
-plt.scatter(freq_true[train_no, 2], freq_pred[train_no, 2], color='#FFC61E', label='mode 3', s=marker_size, alpha=1)
-plt.scatter(freq_true[train_no, 3], freq_pred[train_no, 3], color='#AF58BA', label='mode 4', s=marker_size, alpha=1)
-plt.plot([0,30], [0,30], linestyle='--', color='black', label='\u00B1 0%')
-plt.plot([0,30], [0,30*0.9], linestyle='--', color='blue', label='\u00B1 10%')
-plt.plot([0,30*0.9], [0,30], linestyle='--', color='blue')
-plt.xlim([0,25])
-plt.ylim([0,25])
-plt.legend(prop={'family': 'Times New Roman', 'size': 16}, handlelength=1, borderpad=0.1, labelspacing=0.1)
-plt.xticks(fontsize=18, fontname='Times New Roman')
-plt.yticks(fontsize=18, fontname='Times New Roman')
-plt.xlabel('True Frequency (Hz)', fontname='Times New Roman', fontsize=18)
-plt.ylabel('Identified Frequency (Hz)', fontname='Times New Roman', fontsize=18)
 plt.grid()
 plt.tight_layout()
 plt.show()
@@ -877,25 +848,6 @@ plt.tight_layout()
 plt.show()
 
 zeta_limit = 0.011
-# damping ratio results of training set %
-plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(zeta_true[train_no, 0]*100, zeta_pred[train_no, 0]*100, color='#FF1F5B', label='mode 1', s=marker_size)
-plt.scatter(zeta_true[train_no, 1]*100, zeta_pred[train_no, 1]*100, color='#00CD6C', label='mode 2', s=marker_size)
-plt.scatter(zeta_true[train_no, 2]*100, zeta_pred[train_no, 2]*100, color='#FFC61E', label='mode 3', s=marker_size)
-plt.scatter(zeta_true[train_no, 3]*100, zeta_pred[train_no, 3]*100, color='#AF58BA', label='mode 4', s=marker_size)
-plt.plot([0,zeta_limit*100], [0,zeta_limit*100], linestyle='--', color='black', label='\u00B1 0%')
-plt.plot([0,zeta_limit*100], [0,zeta_limit*0.9*100], linestyle='--', color='blue', label='\u00B1 10%')
-plt.plot([0,zeta_limit*0.9*100], [0,zeta_limit*100], linestyle='--', color='blue')
-plt.xlim([0.003*100,zeta_limit*100])
-plt.ylim([0.003*100,zeta_limit*100])
-plt.legend(prop={'family': 'Times New Roman', 'size': 16}, handlelength=1, borderpad=0.1, labelspacing=0.1)
-plt.xticks(fontsize=18, fontname='Times New Roman')
-plt.yticks(fontsize=18, fontname='Times New Roman')
-plt.xlabel('True Damping Ratio (%)', fontname='Times New Roman', fontsize=18)
-plt.ylabel('Identified Damping Ratio (%)', fontname='Times New Roman', fontsize=18)
-plt.grid()
-plt.tight_layout()
-plt.show()
 
 # damping ratio results of testing set %
 plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
@@ -916,301 +868,76 @@ plt.ylabel('Identified Damping Ratio (%)', fontname='Times New Roman', fontsize=
 plt.grid()
 plt.tight_layout()
 plt.show()
-# %% test trained model with 'population 1 + noise' or 'population 2' 
-# load test data
-
-# pupolation 1- simply-supported+noise
-mat_contents = sio.loadmat("./trapezoid_pwelch_bottom_input_noise10.mat") 
-# pupolation 2- cantilever
-# mat_contents = sio.loadmat("./trapezoid_pwelch_bottom_input_cantilever.mat") 
-
-N_all = 100 # since the dataset size if different, need to modify the division of training and testing set
-N_test = 100
-N_train = 0
-
-acc_input = mat_contents['acceleration_pwelch'][:, 0]
-input_dim = 1025
-freq = mat_contents['frequency_out'][:, 0]
-zeta = mat_contents['damping_out'][:, 0]
-phi = abs(mat_contents['modeshape_out'][:, 0])*1  # absolute mode shape
-node = mat_contents['node_out'][:, 0]
-element = mat_contents['element_out'][:, 0]
-
-# load trained model
-PATH = "model_SAGE_train2000.pt"
-model.load_state_dict(torch.load(PATH))
-model.eval()
-
-model = model.cpu()
-
-# test with a single sample
-caseN = 20 - 1 + 40
-test_data = Dataset(graph_ids = [caseN])[0]
-graph_test = test_data[0].cpu()
-freq_test_true = test_data[1].cpu()
-zeta_test_true = test_data[2].cpu()
-    
-node_test = node[caseN]
-element_test = element[caseN] - 1
-
-node_mask = torch.ones(len(node_test), dtype=torch.bool)
-
-# missing_indices = np.array(range(1, len(node_test), 2))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(1, len(node_test), 3))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(2, len(node_test), 3))
-# node_mask[missing_indices] = False
-# missing_indices = np.array(range(3, len(node_test), 3))
-# node_mask[missing_indices] = False
-
-missing_ratio = np.count_nonzero(node_mask == False)/len(node_mask)
-print('missing_ratio =', missing_ratio)
-src = np.concatenate((element_test[:,0], element_test[:,1]), axis=0) # bi-directional edge, left-end node no. 
-dst = np.concatenate((element_test[:,1], element_test[:,0]), axis=0) # bi-directional edge, right-end node no.
-edge_index =  torch.LongTensor([list(row) for row in list(zip(src, dst))]).T
-
-acc_test = graph_test.ndata['acc_Y']
-acc_test_FP = Feature_Propagation(acc_test, node_mask, edge_index, len(node_test))
-acc_test_FP[acc_test[:,1]==0, :] = 0
-graph_test.ndata['acc_Y'] = acc_test_FP
-
-magnify = 3
-marker_size = 5
-plt.close('all')
-fig, axs = plt.subplots(2, 2, figsize=(9, 3.5), layout="constrained")
-for mode_order, ax in enumerate(axs.flat):
-    phi_test_true = graph_test.ndata['phi_Y'][:, mode_order]
-    freq_test_pred, zeta_test_pred, phi_test_pred = model(graph_test)
-    phi_test_pred = phi_test_pred[:, mode_order] / phi_test_pred[:, mode_order].max()
-    MSE_ms_model = loss_mse(phi_test_pred, phi_test_true)
-
-    # plot the truss
-    node_pred = np.zeros([len(node_test), 2])
-    node_pred[:, 0] = node_test[:, 0]
-    node_pred[:, 1] = node_test[:, 1] + phi_test_pred.detach().numpy().squeeze() * magnify
-    node_true = np.zeros([len(node_test), 2])
-    node_true[:, 0] = node_test[:, 0]
-    node_true[:, 1] = node_test[:, 1] + phi_test_true.detach().numpy().squeeze() * magnify
-    
-    MAC_phi = MAC(phi_test_pred.detach().numpy().squeeze(), phi_test_true.detach().numpy().squeeze())
-    
-    # Plot mode shapes
-    for ele in element_test:
-        node1 = node_test[ele[0]]
-        node2 = node_test[ele[1]]
-        ax.plot([node1[0], node2[0]], [node1[1], node2[1]], color='#FFC61E')
-    ax.plot(node_test[:, 0], node_test[:, 1], 'o', markersize=marker_size, label='undeformed', color='#FFC61E')
-    for ele in element_test:
-        node1 = node_true[ele[0]]
-        node2 = node_true[ele[1]]
-        ax.plot([node1[0], node2[0]], [node1[1], node2[1]], '--', color='#FF1F5B')
-    ax.plot(node_true[:, 0], node_true[:, 1], 'o', markersize=marker_size, label='true', color='#FF1F5B')
-    for ele in element_test:
-        node1 = node_pred[ele[0]]
-        node2 = node_pred[ele[1]]
-        ax.plot([node1[0], node2[0]], [node1[1], node2[1]], color='#AF58BA')
-    # complete measurements    
-    ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified', color='#AF58BA')
-    # incomplete measurements  
-    # ax.plot(node_pred[:, 0], node_pred[:, 1], 'o', markersize=marker_size, label='identified_known', color='#AF58BA')
-    # ax.plot(node_pred[~node_mask, 0], node_pred[~node_mask, 1], 's', markersize=3, label='identified_unknown', color='#00CD6C')
-    
-    plt.setp(ax.get_xticklabels(), fontsize=10, fontname='Times New Roman')
-    plt.setp(ax.get_yticklabels(), fontsize=10, fontname='Times New Roman')
-    
-    ax.set_xlim(-42,42)
-    ax.set_ylim(-3,10)
-    ax.set_xlabel('X (m)', fontsize=12, fontname='Times New Roman')
-    ax.set_ylabel('Y (m)', fontsize=12, fontname='Times New Roman')
-    title_text = "Mode {:.0f}, MAC={:.5f}".format(mode_order+1, MAC_phi)
-    ax.set_title(title_text, fontsize=12, fontname='Times New Roman')   
-    # ax.set_aspect('equal')
-    ax.grid()
-    
-lines, labels = fig.axes[0].get_legend_handles_labels()
-fig.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, 1), ncol=4, prop={'family': 'Times New Roman'}, fontsize=10, frameon=False)
-plt.tight_layout(rect=[0, 0.01, 1, 0.92])
-plt.show()
-
-print("True Freq:", freq_test_true)
-print("Pred Freq:", freq_test_pred.squeeze())
-
-print("True Zeta:", zeta_test_true)
-print("Pred Zeta:", zeta_test_pred.squeeze())
-
-# test trained model - entire dataset
-freq_pred = np.zeros([N_all, modeN])
-zeta_pred = np.zeros([N_all, modeN])
-phi_pred = []
-
-start_time = time.time()
-# modal identification
-for caseN in range(N_all):
-    if caseN % 100 == 0:
-        print(caseN)   
-    test_data = Dataset(graph_ids = [caseN])[0]
-    graph_test = test_data[0].cpu()           
-    node_test = node[caseN]
-    element_test = element[caseN] - 1   
-    node_mask = torch.ones(len(node_test), dtype=torch.bool)
-    
-    # first two indices: 66% unknown, three indices: 82% unknown
-    # missing_indices = np.array(range(1, len(node_test), 2))
-    # node_mask[missing_indices] = False
-    # missing_indices = np.array(range(1, len(node_test), 3))
-    # node_mask[missing_indices] = False
-    # missing_indices = np.array(range(2, len(node_test), 3))
-    # node_mask[missing_indices] = False
-    
-    missing_ratio = np.count_nonzero(node_mask == False)/len(node_mask)
-    
-    src = np.concatenate((element_test[:,0], element_test[:,1]), axis=0) # bi-directional edge, left-end node no. 
-    dst = np.concatenate((element_test[:,1], element_test[:,0]), axis=0) # bi-directional edge, right-end node no.
-    edge_index =  torch.LongTensor([list(row) for row in list(zip(src, dst))]).T
-    
-    acc_test = graph_test.ndata['acc_Y']
-    acc_test_FP = Feature_Propagation(acc_test, node_mask, edge_index, len(node_test))
-    acc_test_FP[acc_test[:,1]==0, :] = 0
-    graph_test.ndata['acc_Y'] = acc_test_FP
-    
-    freq_test_pred, zeta_test_pred, phi_test_pred = model(graph_test)
-    freq_pred[caseN, :] = freq_test_pred.squeeze().detach().numpy()
-    zeta_pred[caseN, :] = zeta_test_pred.squeeze().detach().numpy()
-    phi_pred.append(phi_test_pred.detach().numpy())
-        
-print("--- %s seconds ---" % (time.time() - start_time))
-print('missing_ratio =', missing_ratio)
-
-# calculate evaluation indicators
-freq_true = np.zeros([N_all, modeN])
-zeta_true = np.zeros([N_all, modeN])
-MAC_phi = np.zeros([N_all, modeN])
-RE_freq = np.zeros([N_all, modeN])
-RE_zeta = np.zeros([N_all, modeN])
-for mode_order in range(modeN):
-    for caseN in range(N_all):
-        if caseN % 100 == 0:
-            print(caseN)    
-        
-        freq_test_true = freq[caseN][mode_order]
-        freq_true[caseN, mode_order] = freq_test_true
-        zeta_test_true = zeta[caseN][mode_order]
-        zeta_true[caseN, mode_order] = zeta_test_true
-        phi_test_true = phi[caseN][:, mode_order]
-
-        RE_freq[caseN, mode_order] = (freq_pred[caseN, mode_order] - freq_test_true) / freq_test_true  # relative error in percentage
-        RE_zeta[caseN, mode_order] = (zeta_pred[caseN, mode_order] - zeta_test_true) / zeta_test_true
-        MAC_phi[caseN, mode_order] = MAC(phi_pred[caseN][:, mode_order], phi_test_true)
-
-# plt.close('all')
-fig, ax = plt.subplots(3, 1, layout="constrained")
-for k in range(3):
-    if k == 0:
-        ax[k].plot(MAC_phi[:, 3], label='model')
-        # ax[k].plot(MAC_pp, label='peak picking')
-        ax[k].set_ylabel('MAC', fontsize=14)
-        ax[k].set_title("Mode Shape MAC", fontsize=14)
-        ax[k].legend(fontsize=14)
-    elif k == 1:
-        ax[k].plot(RE_freq[:, 3])
-        ax[k].set_ylabel('Relative Error', fontsize=14)
-        ax[k].set_title("Frequency MSE", fontsize=14)
-        ax[k].set_xlabel('Sample No.', fontsize=14)
-    else:
-        ax[k].plot(RE_zeta[:, 3])
-        ax[k].set_ylabel('Relative Error', fontsize=14)
-        ax[k].set_title("Damping ratio MSE", fontsize=14)
-        ax[k].set_xlabel('Sample No.', fontsize=14)
-    ax[k].grid()
-
-statistics_phi = np.zeros([3, modeN])
-statistics_freq = np.zeros([3, modeN])
-statistics_zeta = np.zeros([3, modeN])
-
-for j in range(modeN):
-    # mode shape
-    statistics_phi[0, j] = np.mean(MAC_phi[-N_test:, j])
-    statistics_phi[1, j] = np.std(MAC_phi[-N_test:, j])
-    statistics_phi[2, j] = np.min(MAC_phi[-N_test:, j])
-    # frequency
-    statistics_freq[0, j] = np.mean(RE_freq[-N_test:, j])
-    statistics_freq[1, j] = np.std(RE_freq[-N_test:, j])
-    statistics_freq[2, j] = np.max(abs(RE_freq[-N_test:, j]))
-    # damping
-    statistics_zeta[0, j] = np.mean(RE_zeta[-N_test:, j])
-    statistics_zeta[1, j] = np.std(RE_zeta[-N_test:, j])
-    statistics_zeta[2, j] = np.max(abs(RE_zeta[-N_test:, j]))
-
-statistics_phi = np.transpose(statistics_phi)
-statistics_zeta = np.transpose(statistics_zeta) * 100
-statistics_freq = np.transpose(statistics_freq) * 100
-    
-print("Mode shape")
-print(statistics_phi)
-print("Damping")
-print(statistics_zeta)
-print("Freq")
-print(statistics_freq)
 
 
-# mode shape MAC results of testing set
+# test heteroscedasticity of frequency estimation ############################
+
+# visualize the residuals between predicted freq/zeta and true freq/zeta
 plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(np.zeros([N_test, 1])+1, MAC_phi[-N_test:, 0], color='#FF1F5B', label='mode 1', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_test, 1])+2, MAC_phi[-N_test:, 1], color='#00CD6C', label='mode 2', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_test, 1])+3, MAC_phi[-N_test:, 2], color='#FFC61E', label='mode 3', s=marker_size, alpha=1)
-plt.scatter(np.zeros([N_test, 1])+4, MAC_phi[-N_test:, 3], color='#AF58BA', label='mode 4', s=marker_size, alpha=1)
-plt.boxplot(MAC_phi[-N_test:, :], 0, '')
-plt.xticks([1, 2, 3, 4], ['Mode1', 'Mode2', 'Mode3', 'Mode4'])
-plt.ylim([0, 1.05])
-plt.xticks(fontsize=17, fontname='Times New Roman')
-plt.yticks(fontsize=17, fontname='Times New Roman')
-plt.ylabel('MAC', fontname='Times New Roman', fontsize=17)
-plt.grid()
-plt.tight_layout()
-plt.show()
-
-
-# frequency results of testing set
-plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(freq_true[-N_test:, 0], freq_pred[-N_test:, 0], color='#FF1F5B', label='mode 1', s=marker_size)
-plt.scatter(freq_true[-N_test:, 1], freq_pred[-N_test:, 1], color='#00CD6C', label='mode 2', s=marker_size)
-plt.scatter(freq_true[-N_test:, 2], freq_pred[-N_test:, 2], color='#FFC61E', label='mode 3', s=marker_size)
-plt.scatter(freq_true[-N_test:, 3], freq_pred[-N_test:, 3], color='#AF58BA', label='mode 4', s=marker_size)
-plt.plot([0,30], [0,30], linestyle='--', color='black', label='\u00B1 0%')
-plt.plot([0,30], [0,30*0.9], linestyle='--', color='blue', label='\u00B1 10%')
-plt.plot([0,30*0.9], [0,30], linestyle='--', color='blue')
+plt.scatter(freq_true[-N_test:, 0], freq_true[-N_test:, 0]-freq_pred[-N_test:, 0], color='#FF1F5B', label='mode 1', s=marker_size)
+plt.scatter(freq_true[-N_test:, 1], freq_true[-N_test:, 1]-freq_pred[-N_test:, 1], color='#00CD6C', label='mode 2', s=marker_size)
+plt.scatter(freq_true[-N_test:, 2], freq_true[-N_test:, 2]-freq_pred[-N_test:, 2], color='#FFC61E', label='mode 3', s=marker_size)
+plt.scatter(freq_true[-N_test:, 3], freq_true[-N_test:, 3]-freq_pred[-N_test:, 3], color='#AF58BA', label='mode 4', s=marker_size)
 plt.xlim([0,25])
-plt.ylim([0,25])
+plt.ylim([-2,2])
 plt.legend(prop={'family': 'Times New Roman', 'size': 16}, handlelength=1, borderpad=0.1, labelspacing=0.1)
 plt.xticks(fontsize=18, fontname='Times New Roman')
 plt.yticks(fontsize=18, fontname='Times New Roman')
 plt.xlabel('True Frequency (Hz)', fontname='Times New Roman', fontsize=18)
-plt.ylabel('Identified Frequency (Hz)', fontname='Times New Roman', fontsize=18)
+plt.ylabel('Residual Frequency (Hz)', fontname='Times New Roman', fontsize=18)
 plt.grid()
 plt.tight_layout()
 plt.show()
 
-zeta_limit = 0.011
-# damping ratio results of testing set %
+# test heteroscedasticity of damping ratio estimation
 plt.figure(figsize=(4*2.54/2.54, 4*2.54/2.54))
-plt.scatter(zeta_true[-N_test:, 0]*100, zeta_pred[-N_test:, 0]*100, color='#FF1F5B', label='mode 1', s=marker_size)
-plt.scatter(zeta_true[-N_test:, 1]*100, zeta_pred[-N_test:, 1]*100, color='#00CD6C', label='mode 2', s=marker_size)
-plt.scatter(zeta_true[-N_test:, 2]*100, zeta_pred[-N_test:, 2]*100, color='#FFC61E', label='mode 3', s=marker_size)
-plt.scatter(zeta_true[-N_test:, 3]*100, zeta_pred[-N_test:, 3]*100, color='#AF58BA', label='mode 4', s=marker_size)
-plt.plot([0,zeta_limit*100], [0,zeta_limit*100], linestyle='--', color='black', label='\u00B1 0%')
-plt.plot([0,zeta_limit*100], [0,zeta_limit*0.9*100], linestyle='--', color='blue', label='\u00B1 10%')
-plt.plot([0,zeta_limit*0.9*100], [0,zeta_limit*100], linestyle='--', color='blue')
-plt.xlim([0.003*100,zeta_limit*100])
-plt.ylim([0.003*100,zeta_limit*100])
+plt.scatter(zeta_true[-N_test:, 0]*100, zeta_true[-N_test:, 0]*100-zeta_pred[-N_test:, 0]*100, color='#FF1F5B', label='mode 1', s=marker_size)
+plt.scatter(zeta_true[-N_test:, 1]*100, zeta_true[-N_test:, 1]*100-zeta_pred[-N_test:, 1]*100, color='#00CD6C', label='mode 2', s=marker_size)
+plt.scatter(zeta_true[-N_test:, 2]*100, zeta_true[-N_test:, 2]*100-zeta_pred[-N_test:, 2]*100, color='#FFC61E', label='mode 3', s=marker_size)
+plt.scatter(zeta_true[-N_test:, 3]*100, zeta_true[-N_test:, 3]*100-zeta_pred[-N_test:, 3]*100, color='#AF58BA', label='mode 4', s=marker_size)
+plt.xlim([0.4,1.2])
+plt.ylim([-0.1,0.1])
 plt.legend(prop={'family': 'Times New Roman', 'size': 16}, handlelength=1, borderpad=0.1, labelspacing=0.1)
 plt.xticks(fontsize=18, fontname='Times New Roman')
 plt.yticks(fontsize=18, fontname='Times New Roman')
 plt.xlabel('True Damping Ratio (%)', fontname='Times New Roman', fontsize=18)
-plt.ylabel('Identified Damping Ratio (%)', fontname='Times New Roman', fontsize=18)
+plt.ylabel('Residual Damping Ratio (%)', fontname='Times New Roman', fontsize=18)
 plt.grid()
 plt.tight_layout()
 plt.show()
+
+
+# perform generalized Breusch-Pagan Test
+import statsmodels.api as sm
+from statsmodels.stats.diagnostic import het_breuschpagan
+
+X = []
+for i in range(N_test):
+    model_input = torch.mean(Dataset(graph_ids = [i])[0][0].ndata['acc_Y'], dim=0)
+    X.append(model_input.cpu().numpy())
+X = np.array(X)
+
+# frequency
+# Y_pred = freq_pred
+# Y_true = freq_true
+# damping
+Y_pred = zeta_pred
+Y_true = zeta_true
+
+residuals = Y_true - Y_pred
+# Step 3: Flatten residuals and predicted outputs for each output dimension
+p_values = []  # To store p-values for each output dimension
+for i in range(Y_true.shape[1]):
+    residuals_i = residuals[:, i]
+    # Compute squared residuals
+    squared_residuals = residuals_i ** 2
+    # Add a constant for regression
+    X_with_const = sm.add_constant(X)
+    # Perform Breusch-Pagan Test
+    test_stat, p_value, _, _ = het_breuschpagan(squared_residuals, X_with_const[:, :20])
+    p_values.append(p_value)
+    print(f"Output Dimension {i + 1}: BP Test Statistic = {test_stat}, P-Value = {p_value}")
+
 # %% visualize trusses in a population
 magnify = 3
 marker_size = 5
