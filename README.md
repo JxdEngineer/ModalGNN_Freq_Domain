@@ -4,7 +4,7 @@
 
 18/08/2025: Our paper is accepted by "Data-Centric Engineering". Therefore, the latest version of code and data is pushed to this repository.
 
-This repository presents codes of our paper below:
+This repository presents data and code of our paper below:
 
 Jian, X., Xia, Y., Duthé, G., Bacsa, K., Liu, W., & Chatzi, E. (2024). Using Graph Neural Networks and Frequency Domain Data for Automated Operational Modal Analysis of Populations of Structures.
 
